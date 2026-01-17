@@ -1,0 +1,31 @@
+# Python bytecode
+__pycache__/
+*.py[oc]
+
+# Build artifacts
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv/
+.cache
+
+# Logs
+*.log
+logs/
+
+# Environment variables
+.env
+.env.*
+
+# Editor / OS
+.vscode/
+.DS_Store
+
+# Data outputs
+*.json
+*.parquet
+*.csv
+*.gz

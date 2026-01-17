@@ -1,0 +1,45 @@
+services:
+  app:
+    build: .
+    depends_on:
+      redis:
+        condition: service_healthy
+      # postgres:
+      #   condition: service_healthy
+    environment:
+      PYTHONUNBUFFERED: 1
+      REDIS_URL: redis://redis:6379/0
+      # DATABASE_URL: postgresql://postgres:postgres@postgres:5432/nftdb
+      OPENSEA_API_KEY: 15e9b61ab79e4796b14f897882c1d46d
+
+  redis:
+    image: redis:7.4-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 5
+
+  # postgres:
+  #   image: postgres:16.11-alpine
+  #   environment:
+  #     POSTGRES_DB: nftdb
+  #     POSTGRES_USER: postgres
+  #     POSTGRES_PASSWORD: postgres
+  #   ports:
+  #     - "5432:5432"
+  #   volumes:
+  #     - postgres_data:/var/lib/postgresql/data
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U postgres"]
+  #     interval: 2s
+  #     timeout: 3s
+  #     retries: 5
+
+volumes:
+  redis_data:
+#   postgres_data:
