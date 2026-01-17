@@ -1,9 +1,10 @@
-from pipeline.utils.logs import init_logs
 from pipeline.collectors.nft import get_nfts
-from asyncio import run
-from time import perf_counter
+from pipeline.utils.logs import init_logs
+from pipeline.utils.api import CacheAPI
 from logging import getLogger, Logger
 from dotenv import load_dotenv
+from time import perf_counter
+from asyncio import run
 
 
 async def main():
@@ -19,7 +20,11 @@ async def main():
 
     # track program runtime
     start_time: float = perf_counter()
-    await get_nfts(nft_slug)
+    try:
+        await get_nfts(nft_slug)
+    finally:
+        # Cleanup and close api connections and async functions
+        await CacheAPI.cleanup_all()
     end_time: float = perf_counter()
 
     elapsed_time_min: float = (end_time - start_time) / 60

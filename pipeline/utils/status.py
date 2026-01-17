@@ -1,8 +1,10 @@
 from asyncio import sleep, CancelledError
+from .api import CacheAPI
 from sys import stdout
 
 # Console api stats display
-async def status_loop(stats, interval: float = 1.0):
+async def status_loop(interval: float = 1.0):
+    stats = CacheAPI.stats
     is_interactive = stdout.isatty()
     log_interval = interval if is_interactive else 30.0  # Log every 30s in Docker
 

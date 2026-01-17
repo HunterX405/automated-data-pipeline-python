@@ -1,31 +1,38 @@
 from httpx import AsyncClient, Limits, HTTPStatusError, Response, RemoteProtocolError, Timeout, ReadTimeout
+from asyncio import BoundedSemaphore, Task, create_task, CancelledError
+from .cache import build_cache_key, get_max_age, calculate_ttl
 from dataclasses import dataclass, field
-from redis.asyncio import Redis
-from asyncio import BoundedSemaphore
-from stamina import retry
-from collections import Counter
-from os import getenv
-from json import loads, dumps
 from logging import getLogger, Logger
-from .cache import build_cache_key
-from re import search, IGNORECASE, Match
+from redis.asyncio import Redis
+from collections import Counter
+from contextlib import suppress
+from json import loads, dumps
+from typing import ClassVar
+from stamina import retry
+from re import search
+from os import getenv
 
 
 @dataclass(slots = True, kw_only = True)
 class CacheAPI:
     api_key: str | None = None
+    namespace: str = "CacheAPI"
     max_concurrency: int = 10
     max_ttl: int = 86_400
     sleep_timeout = 300
-    redis_cache: Redis = field(init=False)
     client: AsyncClient = field(init=False)
-    semaphore: BoundedSemaphore = field(init=False)
-    stats: Counter = field(default_factory=Counter)
-    log: Logger = field(init=False)
-    namespace: str = "CacheAPI"
+    stats: ClassVar[Counter] = Counter()
+    _status_task: ClassVar[Task | None] = None
+    _instances: ClassVar[list['CacheAPI']] = []
+    _redis_cache: Redis = field(init=False)
+    _semaphore: BoundedSemaphore = field(init=False)
+    _log: Logger = field(init=False)
 
     def __post_init__(self):
-        self.redis_cache = Redis.from_url(
+        # Auto-register every instance for cleanup
+        CacheAPI._instances.append(self)
+
+        self._redis_cache = Redis.from_url(
             getenv("REDIS_URL", "redis://localhost:6379/0"),
             decode_responses = True,
         )
@@ -43,44 +50,66 @@ class CacheAPI:
                 keepalive_expiry = 30.0  # Refresh connections periodically
             )
         )
-        self.log = getLogger(self.namespace)
-        self.semaphore = BoundedSemaphore(self.max_concurrency)
-        self.client.event_hooks['response'] = [self.log_response]
-        self.client.headers['Content-Type'] = "application/json"
+        self.client.event_hooks['response'] = [self._log_response]
+        self.client.headers['content-type'] = "application/json"
         if self.api_key:
             self.client.headers['x-api-key'] = self.api_key
+        
+        self._log = getLogger(self.namespace)
+        self._semaphore = BoundedSemaphore(self.max_concurrency)
 
-    async def log_response(self, response: Response) -> None:
+        # Start status loop once on first instance created
+        if CacheAPI._status_task is None:
+            # Lazy import to prevent circular import
+            from .status import status_loop
+            CacheAPI._status_task = create_task(status_loop())
+
+    async def close(self):
+        """Close this instance's connections"""
+        await self.client.aclose()
+        await self._redis_cache.aclose()
+
+    @classmethod
+    async def cleanup_all(cls):
+        """Cleanup all instances and stop status loop"""
+        if cls._status_task:
+            cls._status_task.cancel()
+            with suppress(CancelledError):
+                await cls._status_task
+            cls._status_task = None
+        
+        for instance in list(cls._instances):
+            await instance.close()
+
+    async def _log_response(self, response: Response) -> None:
+        """ Log event hook for responses from httpx """
         # All responses here will be from network as it is an event hook from httpx
         # response.is_error that is already being logged by stamina @retry event hook in logs.py
         if response.is_success:
-            self.log.debug(
+            self._log.debug(
                 f"'{response.http_version}' {response.request.method} <{response.status_code}> | "
-                f"Cache-Control: {response.headers.get('Cache-Control', "")} | {response.url}"
+                f"Cache-Control: {response.headers.get('cache-control', "")} | {response.url}"
             )
     
-    async def get_cached(self, key: str) -> dict:
-        if (cached_json := await self.redis_cache.get(key)) is not None:
+    async def _get_cached(self, key: str) -> dict:
+        """ Get cached entry from redis cache with key """
+        if (cached_json := await self._redis_cache.get(key)) is not None:
             cached: dict = loads(cached_json)
             self.stats['responses'] += 1
             self.stats["cache_hits"] += 1
             return cached
         return None
     
-    def get_cache_max_age(self, cache_control: str) -> int:
-        max_age: Match = search(r"max-age=(\d+)", cache_control, IGNORECASE)
-        if max_age:
-            return int(max_age.group(1))
-        return 0
-    
-    async def cache_response(self, response: Response, cache_control: str, key: str):
-        max_age = self.get_cache_max_age(cache_control)
-        stale_age: Match = search(r"stale-while-revalidate=(\d+)", cache_control, IGNORECASE)
-        ttl = max_age
-        if stale_age:
-            ttl += int(stale_age.group(1))
-        else:
-            ttl = self.max_ttl
+    async def _cache_response(self, response: Response, key: str, update: bool = False) -> None:
+        """ Cache the response to redis with hashed key """
+        cache_control: str = response.headers.get('cache-control', "")
+        
+        ttl: int = calculate_ttl(cache_control, self.max_ttl)
+
+        if update:
+            await self._redis_cache.expire(key, ttl)
+            return
+
         payload = {
             "status_code": response.status_code,
             "url": str(response.url),
@@ -89,66 +118,39 @@ class CacheAPI:
             "cache-control": cache_control,
             "etag": response.headers.get("etag", ""),
             "last-modified": response.headers.get("last-modified", ""),
-            "max-age": max_age,
+            "max-age": get_max_age(cache_control),
             "ttl": ttl,
             "body": response.json(),
         }
         
-        await self.redis_cache.set(key, dumps(payload), ex=ttl)
+        await self._redis_cache.set(key, dumps(payload), ex=ttl)
     
-    async def validate_response(self, url: str, headers: dict):       
+    async def _validate_response(self, url: str, headers: dict, key: str):
+        """ Validate if the response with the server is still the same with cache and update cache if resource was updated """
         response: Response = await self.client.get(url, headers = headers)
+
         if response.status_code == 304:
-            self.log.debug(f"'{response.http_version}' {response.request.method} <304> Not Modified | From-cache: True | {url}")
+            self._log.debug(f"'{response.http_version}' {response.request.method} <304> Not Modified | From-cache: True | {url}")
+            
+            # Update ttl based on the new cache-control headers
+            await self._cache_response(response, key, update=True)
+
         elif response.status_code == 200:
-            self.log.debug(f"{response.http_version}' {response.request.method} <200> Resource has been updated | {url}")
+            self._log.debug(f"{response.http_version}' {response.request.method} <200> Resource has been updated | {url}")
         return response
     
-    async def is_stale(self, cached_response: dict, key :str):
-        cache_ttl = await self.redis_cache.ttl(key)
-        max_age = cached_response['ttl'] - cached_response['max-age']
-        return cache_ttl < max_age
+    async def _is_stale(self, cached_response: dict, key :str):
+        """ Check if the response is stale if the ttl exceeded max-age """
+        cache_ttl = await self._redis_cache.ttl(key)
+        max_age = cached_response['max-age']
+        # Stale if we're in the stale-while-revalidate window
+        # (remaining TTL is less than the SWR period)
+        stale_window = cached_response['ttl'] - max_age
+        return cache_ttl <= stale_window
 
-    async def get(self, url: str, params: dict | None = None, headers: dict | None = None, ext: dict | None = None):
-        async with self.semaphore:
-            key = build_cache_key(
-                namespace = self.namespace, 
-                url = url,
-                headers = headers
-            )
-            cached_response = await self.get_cached(key)
-            if cached_response:
-                cache_control = cached_response.get("cache-control", "")
-                etag: str = cached_response.get("etag", "")
-                last_modified: str = cached_response.get("last-modified", "")
-                headers: dict | None = None
-
-                if etag:
-                    headers = {"If-None-Match": etag}    
-                elif last_modified:
-                    headers = {"If-Modified-Since": last_modified}
-
-                is_no_cache = search(r"no-cache", cache_control)
-                is_must_revalidate = search(r"must-revalidate", cache_control)
-                is_stale = await self.is_stale(cached_response, key)
-
-                should_validate = (headers and (is_no_cache or (is_must_revalidate and is_stale)))
-                if should_validate:
-                    response: Response = await self.validate_response(url, headers)
-                    if response.status_code == 200:
-                        self.cache_response(response, response.headers.get('Cache-Control', ""), key)
-                        return response.json()
-                else:
-                    self.log.debug(
-                        f"'{cached_response['http_version']}' {cached_response['method']} <{cached_response['status_code']}> | "
-                        f"From-cache: True | {cached_response['url']}"
-                    )
-                return cached_response['body']
-
-            return await self._get_with_retry(url, params, headers, ext, key)
-    
     @retry(on = (HTTPStatusError, RemoteProtocolError, ReadTimeout), wait_initial = 1, wait_max = sleep_timeout)
     async def _get_with_retry(self, url, params, headers, ext, key):
+        """ Get response using httpx async client with retry if response was not successfull """
         response = await self.client.get(
             url=url,
             params=params,
@@ -159,9 +161,50 @@ class CacheAPI:
 
         cache_control: str = response.headers.get('cache-control', "")
         if not search(r"no-store", cache_control):
-            await self.cache_response(response, cache_control, key)
+            await self._cache_response(response, cache_control, key)
 
         self.stats['responses'] += 1
         self.stats["network_requests"] += 1
 
         return response.json()
+    
+    async def get(self, url: str, params: dict | None = None, headers: dict | None = None, ext: dict | None = None):
+        """ Get the response either from cache or server and validate the cached response if needed """
+        async with self._semaphore:
+            key = build_cache_key(namespace=self.namespace, url=url, headers=headers)
+            cached_response = await self._get_cached(key)
+
+            if not cached_response:
+                return await self._get_with_retry(url, params, headers, ext, key)
+            
+            # There is a cached response
+            cache_control = cached_response.get("cache-control", "")
+
+            # Check if revalidation is needed according to Cache-Control directives
+            needs_revalidation = (
+                search(r"no-cache", cache_control) or
+                (search(r"must-revalidate", cache_control) and await self._is_stale(cached_response, key))
+            )
+
+            if needs_revalidation:
+                revalidation_headers: dict = {}
+                if etag := cached_response.get("etag", ""):
+                    revalidation_headers["if-none-match"] = etag
+                elif last_modified := cached_response.get("last-modified", ""):
+                    revalidation_headers["if-modified-since"] = last_modified
+
+                if revalidation_headers:
+                    response: Response = await self._validate_response(url, revalidation_headers, key)
+                    self.stats['responses'] += 1
+
+                    if response.status_code == 200:
+                        self.stats["network_requests"] += 1
+                        await self._cache_response(response, key)
+                        return response.json()
+            
+            # Serve from cache 
+            self._log.debug(
+                f"'{cached_response['http_version']}' {cached_response['method']} "
+                f"<{cached_response['status_code']}> | From-cache: True | {cached_response['url']}"
+            )
+            return cached_response['body']

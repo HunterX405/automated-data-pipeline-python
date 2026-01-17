@@ -1,9 +1,7 @@
-from ..utils.api import CacheAPI
-from ..utils.status import status_loop
+from .api_clients import get_opensea_client, get_metadata_client
 from logging import getLogger, Logger
-from asyncio import TaskGroup, create_task, CancelledError
-from .api_clients import get_opensea_client, get_metadata_client, get_stats
-from contextlib import suppress
+from ..utils.api import CacheAPI
+from asyncio import TaskGroup
 from json import dump
 
 log: Logger = getLogger('NFT')
@@ -51,9 +49,6 @@ async def get_all_nfts(opensea_client: CacheAPI, metadata_client: CacheAPI, cont
 
 async def get_nfts(nft_slug: str):
     try:
-        # Console API stats display
-        status_task = create_task(status_loop(get_stats()))
-
         opensea_client = get_opensea_client()
         collection_metadata: dict = await get_nft_collection_metadata(opensea_client, nft_slug)
         
@@ -75,9 +70,3 @@ async def get_nfts(nft_slug: str):
     
     except IOError as e:
         log.error(f"Error writing to file: {e}")
-    finally:
-        # clean shutdown of status loop
-        if status_task:
-            status_task.cancel()
-            with suppress(CancelledError):
-                await status_task

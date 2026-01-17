@@ -1,25 +1,18 @@
-from os import getenv
 from ..utils.api import CacheAPI
-from collections import Counter
-
-# Console api stats
-_stats = Counter()
-
-def get_stats():
-    return _stats
+from os import getenv
 
 def get_opensea_client():
+    """Create OpenSea API client with shared stats"""
     OPENSEA_API_KEY = getenv("OPENSEA_API_KEY")
     return CacheAPI(
         api_key = OPENSEA_API_KEY, 
-        max_concurrency = 2, 
-        stats = _stats,
-        namespace = "opensea"
+        namespace = "opensea",
+        max_concurrency = 2
     )
 
 def get_metadata_client():
+    """Create metadata API client with shared stats"""
     return CacheAPI(
-    max_concurrency = 10, 
-    stats = _stats,
-    namespace = "metadata"
+    namespace = "metadata",
+    max_concurrency = 10
 )

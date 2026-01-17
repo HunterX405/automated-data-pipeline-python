@@ -1,11 +1,11 @@
 from logging import getLogger, StreamHandler, Formatter, DEBUG, WARNING, ERROR, INFO
-from logging.handlers import RotatingFileHandler
 from stamina.instrumentation import RetryDetails, set_on_retry_hooks
+from .api import CacheAPI
+from logging.handlers import RotatingFileHandler
+from argparse import ArgumentParser, Namespace
+from httpx import HTTPStatusError, Response
 from pathlib import Path
 from sys import stdout
-from argparse import ArgumentParser, Namespace
-from ..collectors.api_clients import get_stats
-from httpx import HTTPStatusError, Response
 
 
 class StatusAwareStreamHandler(StreamHandler):
@@ -32,7 +32,7 @@ def set_logger(log_to_file: bool = False):
 
     # Stamina @retry logger
     def log_retry_sleep(rd: RetryDetails):
-        stats = get_stats()
+        stats = CacheAPI.stats
         stats["retries"] += 1
         stats["errors"] += 1
         error = rd.caused_by
