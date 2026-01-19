@@ -1,9 +1,5 @@
 from logging import getLogger, StreamHandler, Formatter, DEBUG, WARNING, ERROR, INFO
-from stamina.instrumentation import RetryDetails, set_on_retry_hooks
-from .api import CacheAPI
 from logging.handlers import RotatingFileHandler
-from argparse import ArgumentParser, Namespace
-from httpx import HTTPStatusError, Response
 from pathlib import Path
 from sys import stdout
 
@@ -30,28 +26,6 @@ def set_logger(log_to_file: bool = False):
     getLogger("hpack").setLevel(ERROR)
     getLogger("h2").setLevel(ERROR)
 
-    # Stamina @retry logger
-    def log_retry_sleep(rd: RetryDetails):
-        stats = CacheAPI.stats
-        stats["retries"] += 1
-        stats["errors"] += 1
-        error = rd.caused_by
-        if error.__class__ == HTTPStatusError:
-            response: Response = error.response
-            root_logger.debug(
-                f"<{response.status_code}> {response.reason_phrase} | "
-                f"Retry #{rd.retry_num} | Sleep {rd.wait_for:.2f}s | "
-                f"Elapsed: {rd.waited_so_far:.2f}s | {response.url.host}"
-            )
-        else:
-            root_logger.debug(
-                f"{error} | Retry #{rd.retry_num} | "
-                f"Sleep {rd.wait_for:.2f}s | "
-                f"Elapsed: {rd.waited_so_far:.2f}s | {error.request.url.host}"
-            )
-    
-    set_on_retry_hooks([log_retry_sleep])
-
     formatter = Formatter(
         '%(asctime)s %(levelname)s: %(name)s.%(funcName)s() - %(message)s', 
         datefmt='%Y-%m-%d %H:%M:%S'
@@ -77,16 +51,3 @@ def set_logger(log_to_file: bool = False):
         file_handler.setLevel(DEBUG)
         file_handler.setFormatter(formatter)
         root_logger.addHandler(file_handler)
-
-def parse_args():
-    parser = ArgumentParser()
-    parser.add_argument(
-        "--logfile",
-        action="store_true",
-        help="Enable file logging (project.log)",
-    )
-    return parser.parse_args()
-
-def init_logs():
-    args: Namespace = parse_args()
-    set_logger(log_to_file = args.logfile)

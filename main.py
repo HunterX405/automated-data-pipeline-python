@@ -1,5 +1,7 @@
-from pipeline.collectors.nft import get_nfts
-from pipeline.utils.logs import init_logs
+from stamina.instrumentation import set_on_retry_hooks
+from argparse import ArgumentParser, Namespace
+from pipeline.collectors.nft import get_all_nfts
+from pipeline.utils.logs import set_logger
 from pipeline.utils.api import CacheAPI
 from logging import getLogger, Logger
 from dotenv import load_dotenv
@@ -11,17 +13,30 @@ async def main():
     # load environment variables
     load_dotenv()
 
+    # Optional console arguments
+    parser = ArgumentParser()
+    # --logfile flag to output logs to a project.log file
+    parser.add_argument(
+        "-l", "--logfile",
+        action="store_true",
+        help="Enable file logging (project.log)",
+    )
+    args: Namespace = parser.parse_args()
+
     # logs
-    init_logs()
-    log: Logger = getLogger('main')
+    set_logger(args.logfile)
+    log: Logger = getLogger()
+
+    # CacheAPI retry logs event hook
+    set_on_retry_hooks([CacheAPI.log_retry_sleep])
 
     # NFT collection name to extract nfts from
-    nft_slug = 'dxterminal'
+    nft_slug: str = 'dxterminal'
 
     # track program runtime
     start_time: float = perf_counter()
     try:
-        await get_nfts(nft_slug)
+        await get_all_nfts(nft_slug)
     finally:
         # Cleanup and close api connections and async functions
         await CacheAPI.cleanup_all()

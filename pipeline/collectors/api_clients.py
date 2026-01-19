@@ -2,7 +2,7 @@ from ..utils.api import CacheAPI
 from os import getenv
 
 def get_opensea_client():
-    """Create OpenSea API client with shared stats"""
+    """Get OpenSea API client"""
     OPENSEA_API_KEY = getenv("OPENSEA_API_KEY")
     return CacheAPI(
         api_key = OPENSEA_API_KEY, 
@@ -11,8 +11,8 @@ def get_opensea_client():
     )
 
 def get_metadata_client():
-    """Create metadata API client with shared stats"""
+    """Get nft metadata API client"""
     return CacheAPI(
     namespace = "metadata",
-    max_concurrency = 10
+    max_concurrency = 15
 )
