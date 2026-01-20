@@ -11,14 +11,14 @@ An extensible, production-ready data pipeline framework for automatically fetchi
 - **Scalable architecture**: Async patterns with configurable concurrency limits
 - **Future web interface**: Interactive web app to explore and visualize collected datasets
 
-## 🏗️ Architecture
+## Architecture
 
 The pipeline follows an **ETL (Extract, Transform, Load)** pattern:
 
 ```
 ┌─────────────┐     ┌──────────────┐     ┌─────────────┐     ┌─────────────┐
 │   Extract   │ --> │  Transform   │ --> │    Load     │ --> │   Storage   │
-│  (Collect)  │     │ (Normalize)   │     │  (Parquet)  │     │  (Parquet)  │
+│  (Collect)  │     │ (Normalize)  │     │  (PyArrows) │     │  (Parquet)  │
 └─────────────┘     └──────────────┘     └─────────────┘     └─────────────┘
 ```
 
@@ -29,7 +29,7 @@ The pipeline follows an **ETL (Extract, Transform, Load)** pattern:
 - **Transformers**: Normalization logic to convert raw API responses into structured Arrow tables
 - **Loaders**: Parquet file writers with configurable compression and partitioning
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 automated-data-pipeline/
