@@ -1,5 +1,4 @@
 import pyarrow as pa
-import pyarrow.parquet as pq
 from logging import getLogger, Logger
 
 log: Logger = getLogger('transform')
