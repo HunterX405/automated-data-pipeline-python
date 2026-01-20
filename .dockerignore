@@ -27,8 +27,10 @@ logs/
 # Editor / OS
 .vscode/
 .DS_Store
+.cursor/
 
 # Data outputs
+output/
 *.json
 *.parquet
 *.csv

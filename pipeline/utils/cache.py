@@ -1,4 +1,4 @@
-from urllib.parse import urlsplit, parse_qsl, urlencode, urlunsplit
+from urllib.parse import SplitResult, urlsplit, parse_qsl, urlencode, urlunsplit
 from re import search, IGNORECASE, Match
 from redis.asyncio import Redis
 from json import loads, dumps
@@ -27,8 +27,8 @@ class AsyncCache:
 
     @classmethod
     def normalize_url(cls, url: str) -> str:
-        parts = urlsplit(url)
-        normalized_query = urlencode(sorted(parse_qsl(parts.query)))
+        parts: SplitResult = urlsplit(url, allow_fragments = False)
+        normalized_query: str = urlencode(sorted(parse_qsl(parts.query)))
 
         return urlunsplit((
             parts.scheme.lower(),
@@ -63,13 +63,13 @@ class AsyncCache:
             version: str = "v1",
         ) -> str:
 
-        payload = {
+        payload: dict[str] = {
             "url": cls.normalize_url(url),
             "headers": cls.relevant_headers(headers),
         }
 
-        raw = dumps(payload, sort_keys=True, separators=(",", ":"))
-        digest = sha256(raw.encode()).hexdigest()
+        raw: str = dumps(payload, sort_keys=True, separators=(",", ":"))
+        digest: str = sha256(raw.encode()).hexdigest()
 
         return f"{namespace}:{version}:{digest}"
 
@@ -82,9 +82,9 @@ class AsyncCache:
         
     @classmethod
     def calculate_ttl(cls, cache_control: str) -> int:
-        max_age = cls.get_max_age(cache_control)
+        max_age: int = cls.get_max_age(cache_control)
         stale_age: Match = search(r"stale-while-revalidate=(\d+)", cache_control, IGNORECASE)
-        ttl = max_age
+        ttl: int = max_age
         if stale_age:
             ttl += int(stale_age.group(1))
 
@@ -117,16 +117,16 @@ class AsyncRedisCache(AsyncCache):
         return cls._instance
     
     @classmethod
-    async def close(cls):
+    async def close(cls) -> None:
         """Close the shared connection"""
         if cls._instance is not None:
             await cls._instance.aclose()
             cls._instance = None
 
     @classmethod
-    async def get_cache(cls, key: str) -> dict:
+    async def get_cache(cls, key: str) -> dict[str] | None:
         """ Get cached entry from redis cache with key """
-        redis = cls.get_instance()
+        redis: Redis = cls.get_instance()
         if (cached_json := await redis.get(key)) is not None:
             cached: dict = loads(cached_json)
             return cached
@@ -139,13 +139,13 @@ class AsyncRedisCache(AsyncCache):
         
         ttl: int = cls.calculate_ttl(cache_control)
 
-        redis = cls.get_instance()
+        redis: Redis = cls.get_instance()
 
         if update:
             await redis.expire(key, ttl)
             return
 
-        payload = {
+        payload: dict[str] = {
             "status_code": response.status_code,
             "url": str(response.url),
             "method": response.request.method,
@@ -162,12 +162,21 @@ class AsyncRedisCache(AsyncCache):
         
 
     @classmethod
-    async def is_stale(cls, cached_response: dict, key :str):
+    async def is_stale(cls, cached_response: dict, key :str) -> bool:
         """ Check if the response is stale if the ttl exceeded max-age """
-        redis = cls.get_instance()
-        cache_ttl = await redis.ttl(key)
-        max_age = cached_response['max-age']
-        # Stale if we're in the stale-while-revalidate window
-        # (remaining TTL is less than the SWR period)
-        stale_window = cached_response['ttl'] - max_age
-        return cache_ttl <= stale_window
+        redis: Redis = cls.get_instance()
+        cached_ttl: int = cached_response.get('ttl', 0)
+        remaining_ttl: int = await redis.ttl(key)
+        age: int = cached_ttl - remaining_ttl
+        max_age: int = cached_response.get('max-age', 0)
+        
+        # If key is gone or has no TTL, treat as stale (force network to update resource)
+        if remaining_ttl is None or remaining_ttl < 0:
+            return True
+
+        # If cache control didn't specify max-age, rely solely on Redis TTL (default 24h)
+        if max_age == 0:
+            return False  # fresh until Redis deletes it
+
+        age: int = cached_ttl - remaining_ttl
+        return age >= max_age

@@ -1,4 +1,4 @@
-from logging import getLogger, StreamHandler, Formatter, DEBUG, WARNING, ERROR, INFO
+from logging import getLogger, Logger, StreamHandler, Formatter, DEBUG, WARNING, ERROR, INFO
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from sys import stdout
@@ -13,7 +13,7 @@ class StatusAwareStreamHandler(StreamHandler):
 
 def set_logger(log_to_file: bool = False):
     # Create log handler
-    root_logger = getLogger()
+    root_logger: Logger = getLogger()
     root_logger.setLevel(DEBUG)
 
     # Prevent duplicate handlers
@@ -26,12 +26,12 @@ def set_logger(log_to_file: bool = False):
     getLogger("hpack").setLevel(ERROR)
     getLogger("h2").setLevel(ERROR)
 
-    formatter = Formatter(
+    formatter: Formatter = Formatter(
         '%(asctime)s %(levelname)s: %(name)s.%(funcName)s() - %(message)s', 
         datefmt='%Y-%m-%d %H:%M:%S'
     )
 
-    console_handler = StatusAwareStreamHandler()
+    console_handler: StatusAwareStreamHandler = StatusAwareStreamHandler()
     console_handler.setLevel(INFO)
     console_handler.setFormatter(formatter)
     root_logger.addHandler(console_handler)
@@ -43,7 +43,7 @@ def set_logger(log_to_file: bool = False):
         # Always start the project.log file fresh every run
         Path("./logs/project.log").unlink(missing_ok=True)
 
-        file_handler = RotatingFileHandler(
+        file_handler: RotatingFileHandler = RotatingFileHandler(
             "./logs/project.log",
             maxBytes=5_000_000,
             backupCount=2,
