@@ -2,6 +2,29 @@
 
 An extensible, production-ready data pipeline framework for automatically fetching, transforming, and loading data from various APIs. Currently supports NFT collection data with plans to extend to stocks/crypto prices, weather data, and other datasets.
 
+## Features
+- Custom Redis-backed HTTP caching with Cache-Control directive support
+- Efficient API request management using httpx
+- Data validation and transformation with pandas
+- Optimized storage in Parquet format
+- Data visualization layer
+
+## Tech Stack
+
+**Backend & Data Processing:**
+- Python 3.12
+- httpx (async HTTP client)
+- pandas (data transformation)
+- pyarrow (Parquet storage)
+
+**Infrastructure:**
+- Redis (caching layer)
+- Docker & Docker Compose (containerization)
+
+**Development Tools:**
+- Git & GitHub
+- VS Code
+
 ## Project Goals
 
 - **Multi-domain data ingestion**: Support NFTs, financial markets, weather, and other API-based datasets
@@ -235,5 +258,3 @@ Log levels:
 - `ERROR`: Failures requiring attention
 
 ---
-
-**Built with**: Python 3.12, httpx, PyArrow, Redis, Stamina, Docker
