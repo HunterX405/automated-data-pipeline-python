@@ -10,6 +10,7 @@ dependencies = [
     "pandas>=2.3.3",
     "pyarrow>=23.0.0",
     "pyarrow-stubs>=20.0.0.20251215",
+    "pydantic>=2.12.5",
     "redis>=7.1.0",
     "stamina>=25.2.0",
 ]

@@ -1,182 +1,221 @@
-from urllib.parse import SplitResult, urlsplit, parse_qsl, urlencode, urlunsplit
+from httpx import AsyncHTTPTransport, Request, Response
 from re import search, IGNORECASE, Match
+from logging import Logger, getLogger
 from redis.asyncio import Redis
+from collections import Counter
 from json import loads, dumps
-from typing import ClassVar
-from httpx import Response
 from hashlib import sha256
-from os import getenv
 
 
-class AsyncCache:
+class RedisCacheTransport(AsyncHTTPTransport):
     """
-    Singleton cache manager with all caching operations.
-    Handles connection pooling and cache operations for all API clients.
+    Custom httpx transport that caches responses in Redis.
+    Implements HTTP caching with Cache-Control, ETag, and conditional requests.
+    
+    Expects pre-normalized URLs to be passed in requests.
     """
+    def __init__(
+        self, 
+        redis_url: str, 
+        namespace: str = 'redis_cache', 
+        max_ttl: int = 86_400,
+        version: str = 'v1',
+        stats: Counter = Counter(),
+        **kwargs
+    ) -> None:
+        
+        super().__init__(**kwargs)
+        self._redis = Redis.from_url(redis_url, decode_responses=False)
+        self._namespace = namespace
+        self._max_ttl = max_ttl
+        self._version = version
+        self._log: Logger = getLogger('api')
+        self._stats = stats
 
-    _instance: ClassVar[None] = None
-    _max_ttl: ClassVar[int] = 86_400  # Default 24 hours
+    async def handle_async_request(self, request: Request) -> Response:
+        """Override to add caching layer"""
 
-    @classmethod
-    def get_instance(cls):
-        raise NotImplementedError
+        # Only cache GET requests
+        if request.method != "GET":
+            return await super().handle_async_request(request)
 
-    @classmethod
-    async def close(cls):
-        raise NotImplementedError
+        self._stats['responses'] += 1
+        # URL is already normalized by CacheAPI
+        cache_key = self._build_cache_key(request)
+        cached = await self._get_cached(cache_key)
 
-    @classmethod
-    def normalize_url(cls, url: str) -> str:
-        parts: SplitResult = urlsplit(url, allow_fragments = False)
-        normalized_query: str = urlencode(sorted(parse_qsl(parts.query)))
+        # Cache miss - fetch from network
+        if not cached:
+            response = await super().handle_async_request(request)
+            await response.aread()
+            await self._cache_response(response, cache_key)
+            self._log.debug(f"Cache: MISS - {request.url}")
+            self._stats["network_requests"] += 1
+            return response
 
-        return urlunsplit((
-            parts.scheme.lower(),
-            parts.netloc.lower(),
-            parts.path,
-            normalized_query,
-            "",  # drop fragment
-        ))
+        # Cache hit - check if revalidation needed
+        if await self._needs_revalidation(cached, cache_key):
+            response = await self._revalidate(request, cached, cache_key)
+            if response:
+                self._stats['responses'] += 1
+                self._stats["network_requests"] += 1
+                return response
+        
+        # Serve from cache
+        self._stats["cache_hits"] += 1
+        self._log.debug(f"Cache: HIT - {request.url}")
+        return self._build_response_from_cache(cached)
+    
+    def _build_cache_key(self, request: Request) -> str:
+        """
+        Build cache key from request.
+        Assumes URL is already normalized.
+        """
 
-    @classmethod
-    def relevant_headers(cls, headers: dict[str] | None) -> dict:
-        if not headers:
-            return {}
-
-        ALLOWED: set[str] = {
-            "accept",
-            "content-type",
+        payload = {
+            "url": str(request.url),  # Already normalized by CacheAPI
+            "headers": self._relevant_headers(dict[str, str](request.headers)),
         }
+        
+        raw = dumps(payload, sort_keys=True, separators=(",", ":"))
+        digest = sha256(raw.encode()).hexdigest()
+        
+        return f"{self._namespace}:{self._version}:{digest}"
 
+    @staticmethod
+    def _relevant_headers(headers: dict[str, str]) -> dict[str, str]:
+        """Extract only cache-relevant headers"""
+        allowed: set = {"accept", "content-type"}
         return {
             k.lower(): v 
-            for k, v in headers.items()
-            if k.lower() in ALLOWED
+            for k, v in headers.items() 
+            if k.lower() in allowed
         }
-
-    @classmethod
-    def build_cache_key(
-            cls,
-            namespace: str,
-            url: str,
-            headers: dict | None = None,
-            version: str = "v1",
-        ) -> str:
-
-        payload: dict[str] = {
-            "url": cls.normalize_url(url),
-            "headers": cls.relevant_headers(headers),
-        }
-
-        raw: str = dumps(payload, sort_keys=True, separators=(",", ":"))
-        digest: str = sha256(raw.encode()).hexdigest()
-
-        return f"{namespace}:{version}:{digest}"
-
-    @classmethod
-    def get_max_age(cls, cache_control: str) -> int:
-        max_age: Match = search(r"max-age=(\d+)", cache_control, IGNORECASE)
-        if max_age:
-            return int(max_age.group(1))
-        return 0
-        
-    @classmethod
-    def calculate_ttl(cls, cache_control: str) -> int:
-        max_age: int = cls.get_max_age(cache_control)
-        stale_age: Match = search(r"stale-while-revalidate=(\d+)", cache_control, IGNORECASE)
-        ttl: int = max_age
-        if stale_age:
-            ttl += int(stale_age.group(1))
-
-        if ttl == 0 or ttl > cls._max_ttl:
-            ttl = cls._max_ttl
-
-        return ttl
-
-
-class AsyncRedisCache(AsyncCache):
-    """
-    Singleton Redis cache manager with all caching operations.
-    Handles connection pooling and cache operations for all API clients.
-    """
-    _instance: ClassVar[Redis | None] = None
-
-    @classmethod
-    def get_instance(cls, max_ttl: int | None = None) -> Redis:
-        """Get or create the shared Redis instance"""
-        if cls._instance is None:
-            cls._instance = Redis.from_url(
-                getenv("REDIS_URL", "redis://localhost:6379/0"),
-                decode_responses=True,
-                
-            )
-        
-        if max_ttl is not None:
-            cls._max_ttl = max_ttl
-
-        return cls._instance
     
-    @classmethod
-    async def close(cls) -> None:
-        """Close the shared connection"""
-        if cls._instance is not None:
-            await cls._instance.aclose()
-            cls._instance = None
-
-    @classmethod
-    async def get_cache(cls, key: str) -> dict[str] | None:
-        """ Get cached entry from redis cache with key """
-        redis: Redis = cls.get_instance()
-        if (cached_json := await redis.get(key)) is not None:
-            cached: dict = loads(cached_json)
-            return cached
+    async def _get_cached(self, key: str) -> dict | None:
+        """Retrieve cached response from Redis"""
+        if (cached := await self._redis.get(key)) is not None:
+            return loads(cached)
         return None
-    
-    @classmethod
-    async def set_cache(cls, response: Response, key: str, update: bool = False) -> None:
-        """ Cache the response to redis with hashed key """
-        cache_control: str = response.headers.get('cache-control', "")
-        
-        ttl: int = cls.calculate_ttl(cache_control)
 
-        redis: Redis = cls.get_instance()
+    async def _cache_response(self, response: Response, key: str) -> None:
+        """Store response in Redis cache"""
+        cache_control = response.headers.get("cache-control", "")
 
-        if update:
-            await redis.expire(key, ttl)
+        # Don't cache no-store responses
+        if search(r"no-store", cache_control, IGNORECASE):
             return
 
-        payload: dict[str] = {
-            "status_code": response.status_code,
-            "url": str(response.url),
-            "method": response.request.method,
-            "http_version": response.http_version,
-            "cache-control": cache_control,
-            "etag": response.headers.get("etag", ""),
-            "last-modified": response.headers.get("last-modified", ""),
-            "max-age": cls.get_max_age(cache_control),
-            "ttl": ttl,
-            "body": response.json(),
-        }
-        
-        await redis.set(key, dumps(payload), ex=ttl)
-        
+        ttl = self._calculate_ttl(cache_control)
+        headers = dict(response.headers)
+        headers.pop("content-encoding", None)
+        try:
+            payload: dict[str] = {
+                "status_code": response.status_code,
+                "cache-control": cache_control,
+                "headers": headers,
+                "content": response.text,
+                "max-age": self._get_max_age(cache_control),
+                "ttl": ttl,
+            }
+            
+            await self._redis.set(key, dumps(payload), ex=ttl)
+        except Exception as e:
+            self._log.error(f"Failed to store to cache. {e}")
 
-    @classmethod
-    async def is_stale(cls, cached_response: dict, key :str) -> bool:
-        """ Check if the response is stale if the ttl exceeded max-age """
-        redis: Redis = cls.get_instance()
-        cached_ttl: int = cached_response.get('ttl', 0)
-        remaining_ttl: int = await redis.ttl(key)
-        age: int = cached_ttl - remaining_ttl
-        max_age: int = cached_response.get('max-age', 0)
-        
-        # If key is gone or has no TTL, treat as stale (force network to update resource)
-        if remaining_ttl is None or remaining_ttl < 0:
+    async def _needs_revalidation(
+        self, 
+        cached: dict, 
+        key: str
+    ) -> bool:
+        """Check if cached response needs revalidation"""
+        cache_control = cached.get("cache-control")
+        # If there is no cache-control, store until redis default ttl expires
+        if not cache_control:
+            return False
+        # Always revalidate if no-cache
+        if search(r"no-cache", cache_control, IGNORECASE):
             return True
+        
+        # Check if must-revalidate
+        if search(r"must-revalidate", cache_control, IGNORECASE):
+            # Check if stale
+            max_age: int = cached.get('max-age', 0)
+            # If there is no max-age directive, store until redis ttl expires
+            if max_age == 0:
+                return False  # fresh until Redis automatically deletes it
 
-        # If cache control didn't specify max-age, rely solely on Redis TTL (default 24h)
-        if max_age == 0:
-            return False  # fresh until Redis deletes it
+            remaining_ttl: int = await self._redis.ttl(key)
+            age: int = cached.get('ttl', 0) - remaining_ttl
+            return age >= max_age
+        
+        return False
 
-        age: int = cached_ttl - remaining_ttl
-        return age >= max_age
+    async def _revalidate(
+        self, 
+        request: Request, 
+        cached: dict, 
+        key: str
+    ) -> Response | None:
+        """Perform conditional request for revalidation"""
+        headers: dict[str, str] = cached.get("headers", {})
+        
+        # Add conditional headers from cached response
+        if etag := headers.get("etag"):
+            request.headers["if-none-match"] = etag
+        elif last_modified := headers.get("last-modified"):
+            request.headers["if-modified-since"] = last_modified
+        else:
+            # If no validation headers provided, get a fresh response
+            self._log.debug(f"No validation headers provided, getting a fresh response. | {request.url}")
+        
+        response = await super().handle_async_request(request)
+
+        if response.status_code == 200:
+            # Modified - cache new response
+            self._log.debug(f"<200> Resource has been updated | {request.url}")
+            await self._cache_response(response, key)
+            return response
+        elif response.status_code == 304:
+            # Not modified - update TTL and serve cached
+            self._log.debug(f"<304> Not Modified | From-cache: True | {request.url}")
+            cache_control = response.headers.get("cache-control", "")
+            ttl = self._calculate_ttl(cache_control)
+            await self._redis.expire(key, ttl)
+        else:
+            self._log.warning(f"Revalidation failed, using cached response. | Status Code: <{response.status_code}> ")
+        return None
+
+    def _build_response_from_cache(self, cached: dict[str, str]) -> Response:
+        """Reconstruct Response object from cached data"""
+        return Response(
+            status_code=cached["status_code"],
+            headers=cached['headers'],
+            content=cached["content"],
+        )
+
+    def _calculate_ttl(self, cache_control: str) -> int:
+        """Calculate TTL from Cache-Control header"""
+        ttl = self._get_max_age(cache_control)
+        
+        stale_match: Match | None = search(
+            r"stale-while-revalidate=(\d+)", 
+            cache_control, 
+            IGNORECASE
+        )
+
+        if stale_match:
+            ttl += int(stale_match.group(1))
+        
+        return min(ttl, self._max_ttl) if ttl > 0 else self._max_ttl
+
+    @staticmethod
+    def _get_max_age(cache_control: str) -> int:
+        """Extract max-age from Cache-Control header"""
+        match = search(r"max-age=(\d+)", cache_control, IGNORECASE)
+        return int(match.group(1)) if match else 0
+
+    async def aclose(self) -> None:
+        """Clean up resources"""
+        await self._redis.aclose()
+        await super().aclose()

@@ -3,9 +3,9 @@ from logging import Logger, getLogger
 import pyarrow.parquet as pq
 import pyarrow as pa
 
-log: Logger = getLogger('store')
+log: Logger = getLogger('main')
 
-def to_parquet_file(table: pa.Table | None, filename: str, directory: str = '') -> None:
+def to_parquet_file(table: pa.Table | None, filename: str, directory: str | Path = '') -> None:
     if not table:
         log.error(f"No table provided for {filename}")
         return
